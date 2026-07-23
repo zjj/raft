@@ -26,9 +26,6 @@ const (
 	rpcTimeoutNow
 	rpcRequestPreVote
 
-	// DefaultTimeoutScale is the default TimeoutScale in a NetworkTransport.
-	DefaultTimeoutScale = 256 * 1024 // 256KB
-
 	// DefaultMaxRPCsInFlight is the default value used for pipelining configuration
 	// if a zero value is passed. See https://github.com/hashicorp/raft/pull/541
 	// for rationale. Note, if this is changed we should update the doc comments
@@ -106,8 +103,7 @@ type NetworkTransport struct {
 	streamCancel  context.CancelFunc
 	streamCtxLock sync.RWMutex
 
-	timeout      time.Duration
-	TimeoutScale int
+	timeout time.Duration
 
 	msgpackUseNewTimeFormat bool
 }
@@ -158,8 +154,7 @@ type NetworkTransportConfig struct {
 	// buffer actually allowed 130 RPCs to be inflight at once.
 	MaxRPCsInFlight int
 
-	// Timeout is used to apply I/O deadlines. For InstallSnapshot, we multiply
-	// the timeout by (SnapshotSize / TimeoutScale).
+	// Timeout is used to apply I/O deadlines.
 	Timeout time.Duration
 
 	// MsgpackUseNewTimeFormat when set to true, force the underlying msgpack
@@ -267,7 +262,6 @@ func NewNetworkTransportWithConfig(
 		shutdownCh:              make(chan struct{}),
 		stream:                  config.Stream,
 		timeout:                 config.Timeout,
-		TimeoutScale:            DefaultTimeoutScale,
 		serverAddressProvider:   config.ServerAddressProvider,
 		msgpackUseNewTimeFormat: config.MsgpackUseNewTimeFormat,
 	}
@@ -281,8 +275,7 @@ func NewNetworkTransportWithConfig(
 
 // NewNetworkTransport creates a new network transport with the given dialer
 // and listener. The maxPool controls how many connections we will pool. The
-// timeout is used to apply I/O deadlines. For InstallSnapshot, we multiply
-// the timeout by (SnapshotSize / TimeoutScale).
+// timeout is used to apply I/O deadlines.
 func NewNetworkTransport(
 	stream StreamLayer,
 	maxPool int,
@@ -303,8 +296,7 @@ func NewNetworkTransport(
 
 // NewNetworkTransportWithLogger creates a new network transport with the given logger, dialer
 // and listener. The maxPool controls how many connections we will pool. The
-// timeout is used to apply I/O deadlines. For InstallSnapshot, we multiply
-// the timeout by (SnapshotSize / TimeoutScale).
+// timeout is used to apply I/O deadlines.
 func NewNetworkTransportWithLogger(
 	stream StreamLayer,
 	maxPool int,
@@ -572,15 +564,10 @@ func (n *NetworkTransport) InstallSnapshot(id ServerID, target ServerAddress, ar
 		return err
 	}
 
-	// Scale the read timeout proportionally to the snapshot size so
-	// the follower has enough time to process the data and respond.
-	if n.timeout > 0 {
-		timeout := n.timeout * time.Duration(args.Size/int64(n.TimeoutScale))
-		if timeout < n.timeout {
-			timeout = n.timeout
-		}
-		conn.setReadTimeout(timeout)
-	}
+	// Disable the read deadline: the follower needs unbounded time to install
+	// the snapshot and respond. The connection won't be reused anyway.
+	// TCP keepalive handles truly dead peers.
+	conn.setReadTimeout(0)
 
 	// Decode the response, do not return conn
 	_, err = decodeResponse(conn, resp)
